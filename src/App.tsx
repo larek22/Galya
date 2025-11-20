@@ -813,7 +813,9 @@ const App: React.FC = () => {
         <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
           <div className="flex flex-col gap-3">
             <SlidePreview slide={activeSlide ?? selectedSlide} currentTime={currentTime} />
-          
+
+          </div>
+
           <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 shadow-xl shadow-emerald-500/5">
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-semibold">Шаг 1. Загрузите песню</h2>
