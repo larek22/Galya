@@ -1,5 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
+type TransitionKind =
+  | "cut"
+  | "fade"
+  | "zoom"
+  | "slide-left"
+  | "slide-right"
+  | "slide-up"
+  | "slide-down"
+  | "pan";
+
 interface Slide {
   id: string;
   start: number;
@@ -7,7 +17,11 @@ interface Slide {
   imageUrl?: string | null;
   title?: string;
   subtitle?: string;
-  transition?: "cut" | "fade" | "zoom";
+  transition?: TransitionKind;
+  fitMode?: "contain" | "cover";
+  zoom?: number; // 1 = оригинал, 1.2 = увеличено
+  offsetX?: number; // -50..50 в % ширины
+  offsetY?: number; // -50..50 в % высоты
 }
 
 interface AudioPlayerProps {
@@ -27,6 +41,9 @@ const formatTime = (seconds: number): string => {
     .padStart(2, "0");
   return `${m}:${s}`;
 };
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
 
 const loadImage = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -100,13 +117,27 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({
   );
 };
 
+const transitionStyles: Record<TransitionKind, string> = {
+  cut: "",
+  fade: "transition-opacity duration-700",
+  zoom: "transition-transform duration-700 scale-[1.05]",
+  "slide-left": "transition-transform duration-700 translate-x-1.5",
+  "slide-right": "transition-transform duration-700 -translate-x-1.5",
+  "slide-up": "transition-transform duration-700 translate-y-1.5",
+  "slide-down": "transition-transform duration-700 -translate-y-1.5",
+  pan: "transition-transform duration-[1200ms] scale-[1.02]",
+};
+
 const SlidePreview: React.FC<{ slide: Slide | null }> = ({ slide }) => {
-  const transitionClass =
-    slide?.transition === "fade"
-      ? "transition-opacity duration-700"
-      : slide?.transition === "zoom"
-        ? "transition-transform duration-700 scale-[1.03]"
-        : "";
+  const transitionClass = slide?.transition
+    ? transitionStyles[slide.transition]
+    : transitionStyles.cut;
+
+  const fitMode = slide?.fitMode ?? "contain";
+  const zoom = slide?.zoom ?? 1;
+  const offsetX = slide?.offsetX ?? 0;
+  const offsetY = slide?.offsetY ?? 0;
+  const transform = `translate(${offsetX / 2}%, ${offsetY / 2}%) scale(${zoom})`;
 
   return (
     <div className="w-full aspect-video bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex items-center justify-center relative">
@@ -119,7 +150,10 @@ const SlidePreview: React.FC<{ slide: Slide | null }> = ({ slide }) => {
             <img
               src={slide.imageUrl}
               alt={slide.title ?? "slide"}
-              className="w-full h-full object-cover"
+              className={`w-full h-full ${
+                fitMode === "contain" ? "object-contain" : "object-cover"
+              }`}
+              style={{ transform, transformOrigin: "center" }}
             />
           )}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent pointer-events-none" />
@@ -250,6 +284,10 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(frame);
   }, [isPlaying, audioSrc, projectDuration]);
 
+  useEffect(() => {
+    setCurrentTime((t) => Math.min(t, projectDuration));
+  }, [projectDuration]);
+
   const handleAudioFileChange: React.ChangeEventHandler<HTMLInputElement> = (
     e
   ) => {
@@ -288,6 +326,10 @@ const App: React.FC = () => {
         title: `Кадр ${slides.length + idx + 1}`,
         subtitle: "Добавлено массовым импортом",
         transition: "fade",
+        fitMode: "contain",
+        zoom: 1,
+        offsetX: 0,
+        offsetY: 0,
       };
       nextStart += slide.duration;
       return slide;
@@ -307,6 +349,10 @@ const App: React.FC = () => {
       subtitle:
         subtitleInput || "You're beautiful and you're mine • birthday clip",
       transition: "fade",
+      fitMode: "contain",
+      zoom: 1,
+      offsetX: 0,
+      offsetY: 0,
     };
 
     setSlides((prev) => [...prev, newSlide]);
@@ -378,18 +424,47 @@ const App: React.FC = () => {
     const visibility = slide.transition === "fade" ? Math.min(fadeIn, fadeOut) : 1;
 
     if (image) {
-      const scale = slide.transition === "zoom" ? 1.05 + progress * 0.05 : 1.02;
-      const iw = image.width * scale;
-      const ih = image.height * scale;
-      const ratio = Math.max(canvas.width / iw, canvas.height / ih);
-      const dw = iw * ratio;
-      const dh = ih * ratio;
+      const baseZoom = slide.zoom ?? 1;
+      const transitionZoom = slide.transition === "zoom" ? 1.05 + progress * 0.08 : 1;
+      const combinedZoom = baseZoom * transitionZoom;
+      const fitMode = slide.fitMode ?? "contain";
+      const iw = image.width;
+      const ih = image.height;
+
+      const ratio =
+        fitMode === "contain"
+          ? Math.min(canvas.width / iw, canvas.height / ih)
+          : Math.max(canvas.width / iw, canvas.height / ih);
+
+      const dw = iw * ratio * combinedZoom;
+      const dh = ih * ratio * combinedZoom;
+
+      const offsetX = clamp(slide.offsetX ?? 0, -50, 50);
+      const offsetY = clamp(slide.offsetY ?? 0, -50, 50);
+      const pxOffsetX = (canvas.width * offsetX) / 200;
+      const pxOffsetY = (canvas.height * offsetY) / 200;
+
+      let transitionOffsetX = 0;
+      let transitionOffsetY = 0;
+      if (slide.transition === "slide-left") {
+        transitionOffsetX = canvas.width * (0.08 - progress * 0.08);
+      } else if (slide.transition === "slide-right") {
+        transitionOffsetX = -canvas.width * (0.08 - progress * 0.08);
+      } else if (slide.transition === "slide-up") {
+        transitionOffsetY = canvas.height * (0.08 - progress * 0.08);
+      } else if (slide.transition === "slide-down") {
+        transitionOffsetY = -canvas.height * (0.08 - progress * 0.08);
+      } else if (slide.transition === "pan") {
+        transitionOffsetX = canvas.width * 0.02 * Math.sin(progress * Math.PI);
+        transitionOffsetY = canvas.height * 0.02 * Math.cos(progress * Math.PI);
+      }
+
       ctx.save();
       ctx.globalAlpha = visibility;
       ctx.drawImage(
         image,
-        (canvas.width - dw) / 2,
-        (canvas.height - dh) / 2,
+        (canvas.width - dw) / 2 + pxOffsetX + transitionOffsetX,
+        (canvas.height - dh) / 2 + pxOffsetY + transitionOffsetY,
         dw,
         dh
       );
@@ -518,12 +593,58 @@ const App: React.FC = () => {
           <span className="px-2 py-1 rounded-full bg-slate-900 border border-slate-800">
             Длительность: {formatTime(projectDuration)}
           </span>
+          <button
+            onClick={() => setIsPlaying((v) => !v)}
+            className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400 transition"
+          >
+            {isPlaying ? "⏸ Пауза" : "▶ Предпросмотр"}
+          </button>
         </div>
       </header>
 
       <main className="flex-1 p-4 md:p-6 max-w-6xl w-full mx-auto flex flex-col gap-4">
         <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
-          <SlidePreview slide={activeSlide ?? selectedSlide} />
+          <div className="flex flex-col gap-3">
+            <SlidePreview slide={activeSlide ?? selectedSlide} />
+            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3 flex flex-col gap-2 shadow-xl shadow-emerald-500/5">
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsPlaying((v) => !v)}
+                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400"
+                  >
+                    {isPlaying ? "⏸ Пауза" : "▶ Плей"}
+                  </button>
+                  <button
+                    onClick={() => setCurrentTime(0)}
+                    className="px-3 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-emerald-400"
+                  >
+                    В начало
+                  </button>
+                  {activeSlide && (
+                    <button
+                      onClick={() => setCurrentTime(activeSlide.start)}
+                      className="px-3 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-emerald-400"
+                    >
+                      К активному кадру
+                    </button>
+                  )}
+                </div>
+                <span className="text-[11px] text-slate-400">
+                  {formatTime(currentTime)} / {formatTime(projectDuration)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(projectDuration, 0.1)}
+                step={0.05}
+                value={currentTime}
+                onChange={(e) => setCurrentTime(Number(e.target.value))}
+                className="accent-emerald-400"
+              />
+            </div>
+          </div>
 
           <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 shadow-xl shadow-emerald-500/5">
             <section className="flex flex-col gap-2">
@@ -644,6 +765,12 @@ const App: React.FC = () => {
                       className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs w-24"
                     />
                   </label>
+                  <button
+                    onClick={() => setCurrentTime(selectedSlide.start)}
+                    className="inline-flex items-center justify-start text-left px-3 py-1 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-medium hover:border-emerald-400"
+                  >
+                    Перейти к началу кадра
+                  </button>
                   <label className="text-[11px] flex flex-col gap-1">
                     Заголовок
                     <input
@@ -691,8 +818,89 @@ const App: React.FC = () => {
                       <option value="cut">Мгновенный (cut)</option>
                       <option value="fade">Плавное появление (fade)</option>
                       <option value="zoom">Лёгкий зум (zoom)</option>
+                      <option value="slide-left">Сдвиг слева</option>
+                      <option value="slide-right">Сдвиг справа</option>
+                      <option value="slide-up">Сдвиг снизу</option>
+                      <option value="slide-down">Сдвиг сверху</option>
+                      <option value="pan">Плавная прогулка (pan)</option>
                     </select>
                   </label>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <label className="flex flex-col gap-1">
+                      Режим кадра
+                      <select
+                        value={selectedSlide.fitMode ?? "contain"}
+                        onChange={(e) =>
+                          handleUpdateSelected({
+                            fitMode: e.target.value as Slide["fitMode"],
+                          })
+                        }
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs w-full"
+                      >
+                        <option value="contain">Вписать (без обрезки)</option>
+                        <option value="cover">Заполнить кадр</option>
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      Зум
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={2}
+                        step={0.01}
+                        value={selectedSlide.zoom ?? 1}
+                        onChange={(e) =>
+                          handleUpdateSelected({
+                            zoom: Number(e.target.value),
+                          })
+                        }
+                        className="accent-emerald-400"
+                      />
+                      <span className="text-[10px] text-slate-400">
+                        {((selectedSlide.zoom ?? 1) * 100).toFixed(0)}%
+                      </span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <label className="flex flex-col gap-1">
+                      Смещение X
+                      <input
+                        type="range"
+                        min={-50}
+                        max={50}
+                        step={1}
+                        value={selectedSlide.offsetX ?? 0}
+                        onChange={(e) =>
+                          handleUpdateSelected({
+                            offsetX: Number(e.target.value),
+                          })
+                        }
+                        className="accent-emerald-400"
+                      />
+                      <span className="text-[10px] text-slate-400">
+                        {selectedSlide.offsetX?.toFixed(0) ?? 0}%
+                      </span>
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      Смещение Y
+                      <input
+                        type="range"
+                        min={-50}
+                        max={50}
+                        step={1}
+                        value={selectedSlide.offsetY ?? 0}
+                        onChange={(e) =>
+                          handleUpdateSelected({
+                            offsetY: Number(e.target.value),
+                          })
+                        }
+                        className="accent-emerald-400"
+                      />
+                      <span className="text-[10px] text-slate-400">
+                        {selectedSlide.offsetY?.toFixed(0) ?? 0}%
+                      </span>
+                    </label>
+                  </div>
                   <button
                     onClick={handleDeleteSelected}
                     className="mt-1 inline-flex items-center justify-center px-3 py-1.5 rounded-full bg-rose-500 hover:bg-rose-600 text-xs font-semibold text-slate-950"
