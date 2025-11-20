@@ -689,7 +689,6 @@ const App: React.FC = () => {
     });
     setSlides((prev) => [...prev, ...newSlides]);
     setSelectedSlideId(newSlides[0].id);
-  };
 
     newSlides
       .filter((slide) => slide.mediaType === "video")
