@@ -15,6 +15,7 @@ interface Slide {
   start: number;
   duration: number;
   imageUrl?: string | null;
+  mediaType?: "image" | "video";
   title?: string;
   subtitle?: string;
   transition?: TransitionKind;
@@ -33,6 +34,7 @@ interface AudioPlayerProps {
   isPlaying: boolean;
   setIsPlaying: (v: boolean) => void;
   onDuration: (d: number) => void;
+  audioOffset: number;
 }
 
 const formatTime = (seconds: number): string => {
@@ -47,13 +49,25 @@ const formatTime = (seconds: number): string => {
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
-const loadImage = (src: string) =>
-  new Promise<HTMLImageElement>((resolve, reject) => {
+const loadMedia = (src: string, type: "image" | "video") => {
+  if (type === "video") {
+    return new Promise<HTMLVideoElement>((resolve, reject) => {
+      const vid = document.createElement("video");
+      vid.preload = "auto";
+      vid.muted = true;
+      vid.onloadeddata = () => resolve(vid);
+      vid.onerror = reject;
+      vid.src = src;
+    });
+  }
+
+  return new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = reject;
     img.src = src;
   });
+};
 
 const AudioPlayer: React.FC<AudioPlayerProps> = ({
   src,
@@ -62,21 +76,24 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({
   isPlaying,
   setIsPlaying,
   onDuration,
+  audioOffset,
 }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (Math.abs(audio.currentTime - currentTime) > 0.25) {
-      audio.currentTime = currentTime;
+    const target = Math.max(0, currentTime - audioOffset);
+    if (Math.abs(audio.currentTime - target) > 0.25) {
+      audio.currentTime = target;
     }
-  }, [currentTime]);
+  }, [currentTime, audioOffset]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !src) return;
-    if (isPlaying) {
+    const shouldPlay = isPlaying && currentTime >= audioOffset;
+    if (shouldPlay) {
       audio
         .play()
         .catch(() => {
@@ -85,12 +102,12 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({
     } else {
       audio.pause();
     }
-  }, [isPlaying, src, setIsPlaying]);
+  }, [isPlaying, src, setIsPlaying, currentTime, audioOffset]);
 
   const handleTimeUpdate = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    setCurrentTime(audio.currentTime);
+    setCurrentTime(audio.currentTime + audioOffset);
   };
 
   const handleLoadedMetadata = () => {
@@ -134,6 +151,7 @@ const SlidePreview: React.FC<{ slide: Slide | null; currentTime: number }> = ({
   slide,
   currentTime,
 }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const transitionClass = slide?.transition
     ? transitionStyles[slide.transition]
     : transitionStyles.cut;
@@ -157,6 +175,19 @@ const SlidePreview: React.FC<{ slide: Slide | null; currentTime: number }> = ({
     baseZoom * kbFactor
   ).toFixed(3)})`;
 
+  useEffect(() => {
+    if (!slide || slide.mediaType !== "video") return;
+    const vid = videoRef.current;
+    if (!vid) return;
+    const relative = clamp(currentTime - slide.start, 0, slide.duration);
+    if (Number.isFinite(vid.duration) && vid.duration > 0) {
+      const target = Math.min(vid.duration, relative);
+      if (Math.abs((vid.currentTime ?? 0) - target) > 0.05) {
+        vid.currentTime = target;
+      }
+    }
+  }, [slide, currentTime]);
+
   return (
     <div className="w-full aspect-video bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex items-center justify-center relative">
       {!slide && (
@@ -164,7 +195,7 @@ const SlidePreview: React.FC<{ slide: Slide | null; currentTime: number }> = ({
       )}
       {slide && (
         <div className={`w-full h-full relative ${transitionClass}`}>
-          {slide.imageUrl && (
+          {slide.imageUrl && slide.mediaType !== "video" && (
             <img
               src={slide.imageUrl}
               alt={slide.title ?? "slide"}
@@ -172,6 +203,18 @@ const SlidePreview: React.FC<{ slide: Slide | null; currentTime: number }> = ({
                 fitMode === "contain" ? "object-contain" : "object-cover"
               }`}
               style={{ transform, transformOrigin: "center" }}
+            />
+          )}
+          {slide.imageUrl && slide.mediaType === "video" && (
+            <video
+              ref={videoRef}
+              src={slide.imageUrl}
+              className={`w-full h-full ${
+                fitMode === "contain" ? "object-contain" : "object-cover"
+              }`}
+              style={{ transform, transformOrigin: "center" }}
+              muted
+              playsInline
             />
           )}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent pointer-events-none" />
@@ -268,7 +311,8 @@ const Timeline: React.FC<TimelineProps> = ({
 
 const App: React.FC = () => {
   const [audioSrc, setAudioSrc] = useState<string | null>(null);
-  const [audioDuration, setAudioDuration] = useState<number>(0);
+  const [audioOffset, setAudioOffset] = useState<number>(0);
+  const [audioTrackDuration, setAudioTrackDuration] = useState<number>(0);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
@@ -281,17 +325,25 @@ const App: React.FC = () => {
   const [durationInput, setDurationInput] = useState<number>(4);
   const [bulkDuration, setBulkDuration] = useState<number>(4);
 
+  const [libraryVisuals, setLibraryVisuals] = useState<
+    { name: string; url: string; type: "image" | "video" }[]
+  >([]);
+  const [libraryAudio, setLibraryAudio] = useState<
+    { name: string; url: string; type: "audio" }[]
+  >([]);
+
   const [isExporting, setIsExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string>("");
 
   const projectDuration = useMemo(() => {
-    if (audioDuration) return audioDuration;
+    const audioTotal = audioTrackDuration + Math.max(0, audioOffset);
+    if (audioTotal) return audioTotal;
     const lastSlide = slides.reduce(
       (max, s) => Math.max(max, s.start + s.duration),
       0
     );
     return Math.max(lastSlide, 1);
-  }, [audioDuration, slides]);
+  }, [audioTrackDuration, audioOffset, slides]);
 
   useEffect(() => {
     if (!isPlaying || audioSrc) return;
@@ -317,6 +369,64 @@ const App: React.FC = () => {
   useEffect(() => {
     setCurrentTime((t) => Math.min(t, projectDuration));
   }, [projectDuration]);
+
+  useEffect(() => {
+    if (slides.length) return;
+    const loadLibrary = async () => {
+      try {
+        const res = await fetch("/api/library");
+        if (!res.ok) return;
+        const data = await res.json();
+        const visuals = (data?.visuals ?? []) as {
+          name: string;
+          url: string;
+          type: "image" | "video";
+        }[];
+        const audio = (data?.audio ?? []) as {
+          name: string;
+          url: string;
+          type: "audio";
+        }[];
+        setLibraryVisuals(visuals);
+        setLibraryAudio(audio);
+
+        if (!audioSrc && audio.length) {
+          setAudioSrc(audio[0].url);
+        }
+
+        if (visuals.length) {
+          let t = 0;
+          const autoSlides = visuals.map((item) => {
+            const slide: Slide = {
+              id: crypto.randomUUID(),
+              start: t,
+              duration: bulkDuration,
+              imageUrl: item.url,
+              mediaType: item.type,
+              title: item.name,
+              subtitle:
+                item.type === "video"
+                  ? "Видео из папки media"
+                  : "Фото из папки media",
+              transition: "fade",
+              fitMode: "contain",
+              zoom: 1,
+              offsetX: 0,
+              offsetY: 0,
+              kenBurns: "zoom-in",
+              kenBurnsAmount: 8,
+            };
+            t += bulkDuration;
+            return slide;
+          });
+          setSlides(autoSlides);
+        }
+      } catch (err) {
+        console.warn("Не удалось загрузить локальную медиатеку", err);
+      }
+    };
+    loadLibrary();
+  }, [slides.length, bulkDuration, audioSrc]);
 
   const handleAudioFileChange: React.ChangeEventHandler<HTMLInputElement> = (
     e
@@ -351,10 +461,11 @@ const App: React.FC = () => {
       const slide: Slide = {
         id: crypto.randomUUID(),
         start: nextStart,
-        duration: bulkDuration || 4,
-        imageUrl: url,
-        title: `Кадр ${slides.length + idx + 1}`,
-        subtitle: "Добавлено массовым импортом",
+      duration: bulkDuration || 4,
+      imageUrl: url,
+      mediaType: "image",
+      title: `Кадр ${slides.length + idx + 1}`,
+      subtitle: "Добавлено массовым импортом",
         transition: "fade",
         fitMode: "contain",
         zoom: 1,
@@ -377,6 +488,7 @@ const App: React.FC = () => {
       start: currentTime,
       duration: durationInput || 4,
       imageUrl: pendingImage || null,
+      mediaType: "image",
       title: titleInput || "You're Sixteen",
       subtitle:
         subtitleInput || "You're beautiful and you're mine • birthday clip",
@@ -447,7 +559,7 @@ const App: React.FC = () => {
     ctx: CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
     slide: Slide,
-    image: HTMLImageElement | null,
+    media: HTMLImageElement | HTMLVideoElement | null,
     progress: number
   ) => {
     ctx.fillStyle = "#020617";
@@ -457,7 +569,7 @@ const App: React.FC = () => {
     const fadeOut = Math.min(1, (1 - progress) / 0.2);
     const visibility = slide.transition === "fade" ? Math.min(fadeIn, fadeOut) : 1;
 
-    if (image) {
+    if (media) {
       const baseZoom = slide.zoom ?? 1;
       const transitionZoom = slide.transition === "zoom" ? 1.05 + progress * 0.08 : 1;
       const kbAmount = (slide.kenBurnsAmount ?? 8) / 100;
@@ -469,8 +581,8 @@ const App: React.FC = () => {
           : 1;
       const combinedZoom = baseZoom * transitionZoom * kbFactor;
       const fitMode = slide.fitMode ?? "contain";
-      const iw = image.width;
-      const ih = image.height;
+      const iw = media instanceof HTMLVideoElement ? media.videoWidth : media.width;
+      const ih = media instanceof HTMLVideoElement ? media.videoHeight : media.height;
 
       const ratio =
         fitMode === "contain"
@@ -500,10 +612,14 @@ const App: React.FC = () => {
         transitionOffsetY = canvas.height * 0.02 * Math.cos(progress * Math.PI);
       }
 
+      if (media instanceof HTMLVideoElement && Number.isFinite(media.duration) && media.duration > 0) {
+        media.currentTime = Math.min(media.duration, slide.duration * progress);
+      }
+
       ctx.save();
       ctx.globalAlpha = visibility;
       ctx.drawImage(
-        image,
+        media,
         (canvas.width - dw) / 2 + pxOffsetX + transitionOffsetX,
         (canvas.height - dh) / 2 + pxOffsetY + transitionOffsetY,
         dw,
@@ -592,7 +708,11 @@ const App: React.FC = () => {
     recorder.start();
 
     const loadedImages = await Promise.all(
-      slides.map((s) => (s.imageUrl ? loadImage(s.imageUrl) : Promise.resolve(null)))
+      slides.map((s) =>
+        s.imageUrl
+          ? loadMedia(s.imageUrl, s.mediaType === "video" ? "video" : "image")
+          : Promise.resolve(null)
+      )
     );
 
     for (let i = 0; i < slides.length; i += 1) {
@@ -709,8 +829,29 @@ const App: React.FC = () => {
                 setCurrentTime={setCurrentTime}
                 isPlaying={isPlaying}
                 setIsPlaying={setIsPlaying}
-                onDuration={setAudioDuration}
+                onDuration={setAudioTrackDuration}
+                audioOffset={audioOffset}
               />
+              <label className="text-[11px] flex flex-col gap-2 bg-slate-900 border border-slate-800 rounded-xl p-3">
+                Сдвиг аудио-дорожки
+                <input
+                  type="range"
+                  min={-30}
+                  max={120}
+                  step={0.1}
+                  value={audioOffset}
+                  onChange={(e) => setAudioOffset(Number(e.target.value))}
+                  className="accent-emerald-500"
+                />
+                <div className="flex justify-between text-[11px] text-slate-400">
+                  <span>{audioOffset.toFixed(1)} сек</span>
+                  <span>
+                    {audioOffset >= 0
+                      ? "Песня стартует после старта таймлайна"
+                      : "Песня начнётся раньше точки 0"}
+                  </span>
+                </div>
+              </label>
               <p className="text-[11px] text-slate-500">
                 Лучше использовать оригинал: "You're Sixteen (You're Beautiful and You're Mine)".
               </p>
