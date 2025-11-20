@@ -379,7 +379,14 @@ const App: React.FC = () => {
   const [slides, setSlides] = useState<Slide[]>([]);
   const [selectedSlideId, setSelectedSlideId] = useState<string | null>(null);
 
-  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [pendingVisual, setPendingVisual] = useState<
+    | {
+        url: string;
+        type: "image" | "video";
+        duration?: number | null;
+      }
+    | null
+  >(null);
   const [titleInput, setTitleInput] = useState<string>("");
   const [subtitleInput, setSubtitleInput] = useState<string>("");
   const [durationInput, setDurationInput] = useState<number>(4);
@@ -395,6 +402,7 @@ const App: React.FC = () => {
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [extraAudioTracks, setExtraAudioTracks] = useState<AudioTrack[]>([]);
   const extraAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const probedAudioDurations = useRef<Set<string>>(new Set());
 
   const [isExporting, setIsExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string>("");
@@ -487,6 +495,25 @@ const App: React.FC = () => {
   }, [extraAudioTracks, currentTime, isPlaying]);
 
   useEffect(() => {
+    extraAudioTracks.forEach((track) => {
+      if (probedAudioDurations.current.has(track.id)) return;
+      probedAudioDurations.current.add(track.id);
+      const audio = document.createElement("audio");
+      audio.preload = "metadata";
+      audio.onloadedmetadata = () => {
+        if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        setExtraAudioTracks((prev) =>
+          prev.map((t) => (t.id === track.id ? { ...t, duration: audio.duration } : t))
+        );
+      };
+      audio.onerror = () => {
+        probedAudioDurations.current.delete(track.id);
+      };
+      audio.src = track.src;
+    });
+  }, [extraAudioTracks]);
+
+  useEffect(() => {
     if (libraryLoaded) return;
     const loadLibrary = async () => {
       try {
@@ -517,7 +544,7 @@ const App: React.FC = () => {
             label: item.name,
             src: item.url,
             start: Math.max(0, audioOffset),
-            duration: 60,
+            duration: 0,
             kind: "extra" as const,
             enabled: true,
           }));
@@ -566,6 +593,20 @@ const App: React.FC = () => {
             });
           if (autoSlides.length) {
             setSlides((prev) => [...prev, ...autoSlides]);
+            autoSlides
+              .filter((s) => s.mediaType === "video" && s.imageUrl)
+              .forEach((slide) => {
+                loadMedia(slide.imageUrl!, "video")
+                  .then((vid) => {
+                    if (!Number.isFinite(vid.duration) || vid.duration <= 0) return;
+                    setSlides((prev) =>
+                      prev.map((s) =>
+                        s.id === slide.id ? { ...s, duration: vid.duration } : s
+                      )
+                    );
+                  })
+                  .catch(() => {});
+              });
           }
         }
       } catch (err) {
@@ -586,16 +627,33 @@ const App: React.FC = () => {
     setCurrentTime(0);
   };
 
-  const handleImageFileChange: React.ChangeEventHandler<HTMLInputElement> = (
+  const handleVisualFileChange: React.ChangeEventHandler<HTMLInputElement> = (
     e
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const url = URL.createObjectURL(file);
-    setPendingImage(url);
+    const isVideo = file.type.startsWith("video/");
+    setPendingVisual({ url, type: isVideo ? "video" : "image", duration: null });
+
+    if (isVideo) {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.onloadedmetadata = () => {
+        const dur = Number.isFinite(video.duration) ? video.duration : null;
+        setPendingVisual({ url, type: "video", duration: dur });
+        if (dur && dur > 0) {
+          setDurationInput(Math.max(1, Math.min(120, dur)));
+        }
+      };
+      video.onerror = () => {
+        setPendingVisual({ url, type: "video", duration: null });
+      };
+      video.src = url;
+    }
   };
 
-  const handleBulkImageChange: React.ChangeEventHandler<HTMLInputElement> = (
+  const handleBulkVisualChange: React.ChangeEventHandler<HTMLInputElement> = (
     e
   ) => {
     const files = Array.from(e.target.files ?? []);
@@ -605,22 +663,25 @@ const App: React.FC = () => {
       : currentTime;
     const newSlides: Slide[] = files.map((file, idx) => {
       const url = URL.createObjectURL(file);
+      const isVideo = file.type.startsWith("video/");
       const slide: Slide = {
         id: crypto.randomUUID(),
         start: nextStart,
         duration: bulkDuration || 4,
         imageUrl: url,
-        mediaType: "image",
+        mediaType: isVideo ? "video" : "image",
         title: `Кадр ${slides.length + idx + 1}`,
-        subtitle: "Добавлено массовым импортом",
+        subtitle: isVideo
+          ? "Видео из массового импорта"
+          : "Фото из массового импорта",
         transition: "fade",
         fitMode: "contain",
         zoom: 1,
         offsetX: 0,
         offsetY: 0,
-        kenBurns: "zoom-in",
+        kenBurns: isVideo ? "none" : "zoom-in",
         kenBurnsAmount: 8,
-        useVideoAudio: false,
+        useVideoAudio: isVideo,
         videoAudioOffset: 0,
       };
       nextStart += slide.duration;
@@ -628,6 +689,22 @@ const App: React.FC = () => {
     });
     setSlides((prev) => [...prev, ...newSlides]);
     setSelectedSlideId(newSlides[0].id);
+  };
+
+    newSlides
+      .filter((slide) => slide.mediaType === "video")
+      .forEach((slide) => {
+        loadMedia(slide.imageUrl!, "video")
+          .then((vid) => {
+            if (!Number.isFinite(vid.duration) || vid.duration <= 0) return;
+            setSlides((prev) =>
+              prev.map((s) =>
+                s.id === slide.id ? { ...s, duration: vid.duration } : s
+              )
+            );
+          })
+          .catch(() => {});
+      });
   };
 
   const handleExtraAudioUpload: React.ChangeEventHandler<HTMLInputElement> = (
@@ -643,7 +720,7 @@ const App: React.FC = () => {
         label: file.name,
         src: url,
         start: startAt,
-        duration: 60,
+        duration: 0,
         kind: "extra",
         enabled: true,
       };
@@ -667,9 +744,12 @@ const App: React.FC = () => {
     const newSlide: Slide = {
       id: crypto.randomUUID(),
       start: currentTime,
-      duration: durationInput || 4,
-      imageUrl: pendingImage || null,
-      mediaType: "image",
+      duration:
+        (pendingVisual?.duration && pendingVisual.duration > 0
+          ? pendingVisual.duration
+          : durationInput) || 4,
+      imageUrl: pendingVisual?.url || null,
+      mediaType: pendingVisual?.type ?? "image",
       title: titleInput || "You're Sixteen",
       subtitle:
         subtitleInput || "You're beautiful and you're mine • birthday clip",
@@ -678,14 +758,29 @@ const App: React.FC = () => {
       zoom: 1,
       offsetX: 0,
       offsetY: 0,
-      kenBurns: "zoom-in",
+      kenBurns: pendingVisual?.type === "video" ? "none" : "zoom-in",
       kenBurnsAmount: 8,
-      useVideoAudio: false,
+      useVideoAudio: pendingVisual?.type === "video",
       videoAudioOffset: 0,
     };
 
     setSlides((prev) => [...prev, newSlide]);
     setSelectedSlideId(newSlide.id);
+
+    if (pendingVisual?.type === "video" && pendingVisual.url) {
+      loadMedia(pendingVisual.url, "video")
+        .then((vid) => {
+          if (!Number.isFinite(vid.duration) || vid.duration <= 0) return;
+          setSlides((prev) =>
+            prev.map((s) =>
+              s.id === newSlide.id
+                ? { ...s, duration: Math.max(1, vid.duration) }
+                : s
+            )
+          );
+        })
+        .catch(() => {});
+    }
   };
 
   const activeSlide = useMemo(() => {
@@ -715,11 +810,13 @@ const App: React.FC = () => {
 
     extraAudioTracks.forEach((track, idx) => {
       if (!track.enabled) return;
+      const duration =
+        Number.isFinite(track.duration) && track.duration > 0 ? track.duration : 60;
       layers.push({
         id: track.id,
         label: track.label || `Аудиодорожка ${idx + 1}`,
         start: track.start,
-        duration: Math.max(track.duration, 1),
+        duration: Math.max(duration, 1),
         color: "#fde68a",
       });
     });
@@ -1131,6 +1228,20 @@ const App: React.FC = () => {
                   onChange={(e) => setAudioOffset(Number(e.target.value))}
                   className="accent-emerald-500"
                 />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={-120}
+                    max={300}
+                    step={0.1}
+                    value={audioOffset}
+                    onChange={(e) => setAudioOffset(Number(e.target.value))}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs w-28"
+                  />
+                  <span className="text-[10px] text-slate-400">
+                    Отрицательное значение запускает песню раньше таймлайна
+                  </span>
+                </div>
                 <div className="flex justify-between text-[11px] text-slate-400">
                   <span>{audioOffset.toFixed(1)} сек</span>
                   <span>
@@ -1193,10 +1304,28 @@ const App: React.FC = () => {
                             }
                           />
                         </label>
-                        <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px]">
-                          длительность: {track.duration >= 900 || !Number.isFinite(track.duration)
-                            ? "auto"
-                            : `${track.duration.toFixed(1)}c`}
+                        <label className="flex items-center gap-1">
+                          Длительность:
+                          <input
+                            type="number"
+                            className="bg-slate-900 border border-slate-800 rounded px-2 py-0.5 w-24"
+                            value={
+                              Number.isFinite(track.duration) && track.duration > 0
+                                ? track.duration
+                                : 0
+                            }
+                            step={0.1}
+                            min={0}
+                            max={600}
+                            onChange={(e) =>
+                              handleUpdateAudioTrack(track.id, {
+                                duration: Number(e.target.value) || 0,
+                              })
+                            }
+                          />
+                        </label>
+                        <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px] text-slate-400">
+                          0 = авто по длине файла
                         </span>
                       </div>
                     </div>
@@ -1214,8 +1343,8 @@ const App: React.FC = () => {
               <h2 className="text-sm font-semibold">Шаг 2. Добавьте слайд в текущий момент</h2>
               <input
                 type="file"
-                accept="image/*"
-                onChange={handleImageFileChange}
+                accept="image/*,video/*"
+                onChange={handleVisualFileChange}
                 className="text-xs mb-1 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-sky-500 file:text-slate-950 file:text-xs file:font-semibold hover:file:bg-sky-400"
               />
               <label className="text-[11px] flex flex-col gap-1">
@@ -1266,9 +1395,9 @@ const App: React.FC = () => {
               </p>
               <input
                 type="file"
-                accept="image/*"
-                multiple
-                onChange={handleBulkImageChange}
+                    accept="image/*,video/*"
+                    multiple
+                    onChange={handleBulkVisualChange}
                 className="text-xs mb-1 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-purple-500 file:text-slate-950 file:text-xs file:font-semibold hover:file:bg-purple-400"
               />
               <label className="text-[11px] flex items-center gap-2">
