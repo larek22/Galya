@@ -22,6 +22,8 @@ interface Slide {
   zoom?: number; // 1 = оригинал, 1.2 = увеличено
   offsetX?: number; // -50..50 в % ширины
   offsetY?: number; // -50..50 в % высоты
+  kenBurns?: "none" | "zoom-in" | "zoom-out";
+  kenBurnsAmount?: number; // 0..25 (% прироста масштаба)
 }
 
 interface AudioPlayerProps {
@@ -128,16 +130,32 @@ const transitionStyles: Record<TransitionKind, string> = {
   pan: "transition-transform duration-[1200ms] scale-[1.02]",
 };
 
-const SlidePreview: React.FC<{ slide: Slide | null }> = ({ slide }) => {
+const SlidePreview: React.FC<{ slide: Slide | null; currentTime: number }> = ({
+  slide,
+  currentTime,
+}) => {
   const transitionClass = slide?.transition
     ? transitionStyles[slide.transition]
     : transitionStyles.cut;
 
   const fitMode = slide?.fitMode ?? "contain";
-  const zoom = slide?.zoom ?? 1;
+  const baseZoom = slide?.zoom ?? 1;
   const offsetX = slide?.offsetX ?? 0;
   const offsetY = slide?.offsetY ?? 0;
-  const transform = `translate(${offsetX / 2}%, ${offsetY / 2}%) scale(${zoom})`;
+  const progress = slide
+    ? clamp((currentTime - slide.start) / slide.duration, 0, 1)
+    : 0;
+  const kenBurns = slide?.kenBurns ?? "none";
+  const kbAmount = (slide?.kenBurnsAmount ?? 8) / 100;
+  const kbFactor =
+    kenBurns === "zoom-in"
+      ? 1 + kbAmount * progress
+      : kenBurns === "zoom-out"
+      ? 1 + kbAmount * (1 - progress)
+      : 1;
+  const transform = `translate(${offsetX / 2}%, ${offsetY / 2}%) scale(${(
+    baseZoom * kbFactor
+  ).toFixed(3)})`;
 
   return (
     <div className="w-full aspect-video bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex items-center justify-center relative">
@@ -199,13 +217,13 @@ const Timeline: React.FC<TimelineProps> = ({
   };
 
   return (
-    <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-2">
-      <div className="flex justify-between text-[11px] text-slate-400">
-        <span>Timeline</span>
+    <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 flex flex-col gap-2 shadow-lg">
+      <div className="flex justify-between text-[11px] text-slate-300">
+        <span className="font-semibold">Таймлайн</span>
         <span>{formatTime(duration)}</span>
       </div>
       <div
-        className="relative h-14 bg-slate-900 rounded-xl border border-slate-800 overflow-hidden cursor-pointer"
+        className="relative h-16 bg-gradient-to-r from-slate-950 to-slate-900 rounded-xl border border-slate-800 overflow-hidden cursor-pointer"
         onClick={handleClick}
       >
         {slides.map((s) => {
@@ -213,15 +231,24 @@ const Timeline: React.FC<TimelineProps> = ({
           const endRatio = (s.start + s.duration) / safeDuration;
           const left = `${startRatio * 100}%`;
           const width = `${Math.max((endRatio - startRatio) * 100, 1)}%`;
+          const isCurrent =
+            currentTime >= s.start && currentTime < s.start + s.duration;
           return (
             <div
               key={s.id}
-              className="absolute top-1.5 bottom-1.5 rounded-md bg-emerald-400/80 hover:bg-emerald-300/90 text-[10px] px-1 py-0.5 overflow-hidden whitespace-nowrap text-ellipsis"
+              className={`absolute top-2 bottom-2 rounded-lg border text-[10px] px-2 py-1 overflow-hidden whitespace-nowrap text-ellipsis transition-colors ${
+                isCurrent
+                  ? "bg-emerald-300 text-slate-900 border-emerald-200 shadow-md"
+                  : "bg-emerald-500/70 text-slate-900 border-emerald-200/60 hover:bg-emerald-400/80"
+              }`}
               style={{ left, width }}
               onClick={(evt) => {
                 evt.stopPropagation();
                 onSelectSlide(s.id);
               }}
+              title={`${s.title || "Кадр"} • ${formatTime(s.start)} → ${formatTime(
+                s.start + s.duration
+              )}`}
             >
               {s.title || "Slide"}
             </div>
@@ -230,6 +257,9 @@ const Timeline: React.FC<TimelineProps> = ({
         <div
           className="absolute top-0 bottom-0 w-[2px] bg-rose-400 pointer-events-none"
           style={{ left: `${(currentTime / safeDuration) * 100}%` }}
+        />
+        <div
+          className="absolute -top-1 left-0 right-0 h-4 pointer-events-none bg-gradient-to-b from-slate-950/60 to-transparent"
         />
       </div>
     </div>
@@ -330,6 +360,8 @@ const App: React.FC = () => {
         zoom: 1,
         offsetX: 0,
         offsetY: 0,
+        kenBurns: "zoom-in",
+        kenBurnsAmount: 8,
       };
       nextStart += slide.duration;
       return slide;
@@ -353,6 +385,8 @@ const App: React.FC = () => {
       zoom: 1,
       offsetX: 0,
       offsetY: 0,
+      kenBurns: "zoom-in",
+      kenBurnsAmount: 8,
     };
 
     setSlides((prev) => [...prev, newSlide]);
@@ -426,7 +460,14 @@ const App: React.FC = () => {
     if (image) {
       const baseZoom = slide.zoom ?? 1;
       const transitionZoom = slide.transition === "zoom" ? 1.05 + progress * 0.08 : 1;
-      const combinedZoom = baseZoom * transitionZoom;
+      const kbAmount = (slide.kenBurnsAmount ?? 8) / 100;
+      const kbFactor =
+        slide.kenBurns === "zoom-in"
+          ? 1 + kbAmount * progress
+          : slide.kenBurns === "zoom-out"
+          ? 1 + kbAmount * (1 - progress)
+          : 1;
+      const combinedZoom = baseZoom * transitionZoom * kbFactor;
       const fitMode = slide.fitMode ?? "contain";
       const iw = image.width;
       const ih = image.height;
@@ -603,49 +644,56 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 p-4 md:p-6 max-w-6xl w-full mx-auto flex flex-col gap-4">
-        <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
-          <div className="flex flex-col gap-3">
-            <SlidePreview slide={activeSlide ?? selectedSlide} />
-            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3 flex flex-col gap-2 shadow-xl shadow-emerald-500/5">
-              <div className="flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2">
+        <div className="sticky top-[56px] z-20 space-y-2">
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 md:p-4 shadow-2xl shadow-emerald-500/10 backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-2 md:gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2 md:gap-3">
+                <button
+                  onClick={() => setIsPlaying((v) => !v)}
+                  className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400"
+                >
+                  {isPlaying ? "⏸ Пауза" : "▶ Плей"}
+                </button>
+                <button
+                  onClick={() => setCurrentTime(0)}
+                  className="px-3 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-emerald-400"
+                >
+                  В начало
+                </button>
+                {activeSlide && (
                   <button
-                    onClick={() => setIsPlaying((v) => !v)}
-                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400"
-                  >
-                    {isPlaying ? "⏸ Пауза" : "▶ Плей"}
-                  </button>
-                  <button
-                    onClick={() => setCurrentTime(0)}
+                    onClick={() => setCurrentTime(activeSlide.start)}
                     className="px-3 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-emerald-400"
                   >
-                    В начало
+                    К активному кадру
                   </button>
-                  {activeSlide && (
-                    <button
-                      onClick={() => setCurrentTime(activeSlide.start)}
-                      className="px-3 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-emerald-400"
-                    >
-                      К активному кадру
-                    </button>
-                  )}
-                </div>
-                <span className="text-[11px] text-slate-400">
+                )}
+                <span className="px-2 py-1 rounded-full bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300">
+                  {activeSlide?.title || selectedSlide?.title || "Нет выбранного кадра"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-slate-300">
+                <span className="px-2 py-1 rounded-full bg-slate-950/80 border border-slate-800">
                   {formatTime(currentTime)} / {formatTime(projectDuration)}
                 </span>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={Math.max(projectDuration, 0.1)}
-                step={0.05}
-                value={currentTime}
-                onChange={(e) => setCurrentTime(Number(e.target.value))}
-                className="accent-emerald-400"
+            </div>
+            <div className="mt-2">
+              <Timeline
+                slides={slides}
+                duration={projectDuration}
+                currentTime={currentTime}
+                onSeek={(t) => setCurrentTime(t)}
+                onSelectSlide={(id) => setSelectedSlideId(id)}
               />
             </div>
           </div>
+        </div>
 
+        <div className="grid gap-4 lg:grid-cols-[2fr,1fr] items-start">
+          <div className="flex flex-col gap-3">
+            <SlidePreview slide={activeSlide ?? selectedSlide} currentTime={currentTime} />
+          
           <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 shadow-xl shadow-emerald-500/5">
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-semibold">Шаг 1. Загрузите песню</h2>
@@ -860,6 +908,40 @@ const App: React.FC = () => {
                         {((selectedSlide.zoom ?? 1) * 100).toFixed(0)}%
                       </span>
                     </label>
+                    <label className="flex flex-col gap-1">
+                      Авто-зуум (Ken Burns)
+                      <select
+                        value={selectedSlide.kenBurns ?? "none"}
+                        onChange={(e) =>
+                          handleUpdateSelected({
+                            kenBurns: e.target.value as Slide["kenBurns"],
+                          })
+                        }
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs w-full"
+                      >
+                        <option value="none">Без движения</option>
+                        <option value="zoom-in">Плавный зум-ин</option>
+                        <option value="zoom-out">Плавный зум-аут</option>
+                      </select>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="range"
+                          min={0}
+                          max={25}
+                          step={1}
+                          value={selectedSlide.kenBurnsAmount ?? 8}
+                          onChange={(e) =>
+                            handleUpdateSelected({
+                              kenBurnsAmount: Number(e.target.value),
+                            })
+                          }
+                          className="accent-emerald-400 flex-1"
+                        />
+                        <span className="text-[10px] text-slate-400 w-10 text-right">
+                          {(selectedSlide.kenBurnsAmount ?? 8).toFixed(0)}%
+                        </span>
+                      </div>
+                    </label>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[11px]">
                     <label className="flex flex-col gap-1">
@@ -984,14 +1066,6 @@ const App: React.FC = () => {
             )}
           </div>
         </div>
-
-        <Timeline
-          slides={slides}
-          duration={projectDuration}
-          currentTime={currentTime}
-          onSeek={(t) => setCurrentTime(t)}
-          onSelectSlide={(id) => setSelectedSlideId(id)}
-        />
       </main>
     </div>
   );
